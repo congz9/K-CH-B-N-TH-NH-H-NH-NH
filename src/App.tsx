@@ -17,7 +17,21 @@ import {
   Upload,
   X,
   Video,
-  User as UserIcon
+  User as UserIcon,
+  Pencil,
+  UploadCloud,
+  RotateCcw,
+  RotateCw,
+  Check,
+  Scissors,
+  Shirt,
+  ShoppingBag,
+  Footprints,
+  Glasses,
+  Plus,
+  TextCursorInput,
+  Settings,
+  Key
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -27,8 +41,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { analyzeScript, generateStoryboardImage, generateCharacterConcept, generateVideo } from "./services/geminiService";
-import { Scene, Shot, ScriptAnalysis, Character } from "./types";
+import { Scene, Shot, ScriptAnalysis, Character, CharacterAttributes, CustomAttributeSlot } from "./types";
 import { cn } from "@/lib/utils";
 import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged, db } from "./lib/firebase";
 import type { User } from "firebase/auth";
@@ -121,6 +137,16 @@ export default function App() {
   const [selectedStyle, setSelectedStyle] = useState("Sketch");
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16">("16:9");
+  
+  // Character Editing State
+  const [editingCharId, setEditingCharId] = useState<string | null>(null);
+  const [editCharDesc, setEditCharDesc] = useState<string>("");
+  const characterFileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingCharId, setUploadingCharId] = useState<string | null>(null);
+  
+  // Storyboard Pagination
+  const [currentScenePage, setCurrentScenePage] = useState(0);
   
   // Animatic Player State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -130,6 +156,19 @@ export default function App() {
   const [exportProgress, setExportProgress] = useState(0);
   const playerTimerRef = useRef<NodeJS.Timeout | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  
+  // Custom API Key Settings
+  const [customApiKey, setCustomApiKey] = useState("");
+
+  useEffect(() => {
+    const savedKey = localStorage.getItem("customAIApiKey");
+    if (savedKey) setCustomApiKey(savedKey);
+  }, []);
+
+  const handleSaveApiKey = (key: string) => {
+    setCustomApiKey(key);
+    localStorage.setItem("customAIApiKey", key);
+  };
 
   useEffect(() => {
     // Check if Veo is unlocked via API key selection
@@ -307,7 +346,8 @@ export default function App() {
         propsContext,
         characterImages,
         imageModel,
-        true // Enable High Fidelity / Production Mode
+        true, // Enable High Fidelity / Production Mode
+        aspectRatio
       );
       setAnalysis(prev => {
         if (!prev) return null;
@@ -333,7 +373,7 @@ export default function App() {
     }
   };
 
-  const handleGenerateCharacterConcept = async (charId: string, name: string, description: string) => {
+  const handleGenerateCharacterConcept = async (charId: string, name: string, description: string, referenceImages?: string[]) => {
     setGeneratingCharacters(prev => ({ ...prev, [charId]: true }));
     try {
       let imageModel = "gemini-2.5-flash-image";
@@ -351,15 +391,25 @@ export default function App() {
         name, 
         description, 
         selectedStyle, 
-        imageModel
+        imageModel,
+        referenceImages
       );
       setAnalysis(prev => {
         if (!prev) return null;
         return {
           ...prev,
-          characters: prev.characters.map(c => 
-            c.id === charId ? { ...c, imageUrl } : c
-          )
+          characters: prev.characters.map(c => {
+            if (c.id === charId) {
+              const newHistory = [...(c.imageHistory || []), imageUrl];
+              return { 
+                ...c, 
+                imageUrl, 
+                imageHistory: newHistory,
+                historyIndex: newHistory.length - 1
+              };
+            }
+            return c;
+          })
         };
       });
     } catch (error: any) {
@@ -374,6 +424,228 @@ export default function App() {
     }
   };
 
+  const handleUpdateCharacterAttributeText = (charId: string, attrKey: keyof CharacterAttributes, value: string) => {
+    setAnalysis(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        characters: prev.characters.map(c => {
+          if (c.id === charId) {
+            const currentAttr = c.attributes?.[attrKey] as any;
+            const imageUrl = typeof currentAttr === 'object' ? currentAttr.imageUrl : undefined;
+            return {
+              ...c,
+              attributes: {
+                ...(c.attributes || {}),
+                [attrKey]: { value, imageUrl }
+              }
+            };
+          }
+          return c;
+        })
+      };
+    });
+  };
+
+  const handleAttributeImageUpload = (charId: string, attrKey: keyof CharacterAttributes, e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const imageUrl = reader.result as string;
+        let updatedChar: Character | undefined;
+
+        setAnalysis(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            characters: prev.characters.map(c => {
+              if (c.id === charId) {
+                const currentAttr = c.attributes?.[attrKey] as any;
+                const value = currentAttr?.value || (typeof currentAttr === 'string' ? currentAttr : '');
+                
+                updatedChar = {
+                  ...c,
+                  attributes: {
+                    ...(c.attributes || {}),
+                    [attrKey]: { value, imageUrl }
+                  }
+                };
+                return updatedChar;
+              }
+              return c;
+            })
+          };
+        });
+
+        // Trigger concept generation combining the new item with previous character look
+        if (updatedChar) {
+           setTimeout(() => {
+             handleGenerateCharacterConceptWithAttributes(updatedChar!);
+           }, 500);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleAddCustomAttributeSlot = (charId: string) => {
+    setAnalysis(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        characters: prev.characters.map(c => {
+          if (c.id === charId) {
+            const newSlotId = `custom-${Date.now()}`;
+            return {
+              ...c,
+              attributes: {
+                ...(c.attributes || {}),
+                customSlots: [
+                  ...(c.attributes?.customSlots || []),
+                  { id: newSlotId, label: 'Món đồ mới', value: '' }
+                ]
+              }
+            };
+          }
+          return c;
+        })
+      };
+    });
+  };
+
+  const handleUpdateCustomAttributeText = (charId: string, slotId: string, value: string) => {
+    setAnalysis(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        characters: prev.characters.map(c => {
+          if (c.id === charId && c.attributes?.customSlots) {
+            return {
+              ...c,
+              attributes: {
+                ...c.attributes,
+                customSlots: c.attributes.customSlots.map(slot => 
+                  slot.id === slotId ? { ...slot, value } : slot
+                )
+              }
+            };
+          }
+          return c;
+        })
+      };
+    });
+  };
+
+  const handleUpdateCustomAttributeLabel = (charId: string, slotId: string, label: string) => {
+    setAnalysis(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        characters: prev.characters.map(c => {
+          if (c.id === charId && c.attributes?.customSlots) {
+            return {
+              ...c,
+              attributes: {
+                ...c.attributes,
+                customSlots: c.attributes.customSlots.map(slot => 
+                  slot.id === slotId ? { ...slot, label } : slot
+                )
+              }
+            };
+          }
+          return c;
+        })
+      };
+    });
+  };
+
+  const handleCustomAttributeImageUpload = (charId: string, slotId: string, e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const imageUrl = reader.result as string;
+        let updatedChar: Character | undefined;
+
+        setAnalysis(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            characters: prev.characters.map(c => {
+              if (c.id === charId && c.attributes?.customSlots) {
+                updatedChar = {
+                  ...c,
+                  attributes: {
+                    ...c.attributes,
+                    customSlots: c.attributes.customSlots.map(slot => 
+                      slot.id === slotId ? { ...slot, imageUrl } : slot
+                    )
+                  }
+                };
+                return updatedChar;
+              }
+              return c;
+            })
+          };
+        });
+
+        // Trigger concept generation combining the new item with previous character look
+        if (updatedChar) {
+           setTimeout(() => {
+             handleGenerateCharacterConceptWithAttributes(updatedChar!);
+           }, 500);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleGenerateCharacterConceptWithAttributes = async (char: Character) => {
+    const getVal = (attr: any) => attr?.value || (typeof attr === 'string' ? attr : '');
+    const getImg = (attr: any) => attr?.imageUrl;
+
+    const baseDescriptions = [
+      char.description,
+      getVal(char.attributes?.hair) ? `Tóc/Khuôn mặt: ${getVal(char.attributes?.hair)}` : '',
+      getVal(char.attributes?.clothingTop) ? `Áo/Thân trên: ${getVal(char.attributes?.clothingTop)}` : '',
+      getVal(char.attributes?.clothingBottom) ? `Quần/Thân dưới: ${getVal(char.attributes?.clothingBottom)}` : '',
+      getVal(char.attributes?.shoes) ? `Giày dép: ${getVal(char.attributes?.shoes)}` : '',
+      getVal(char.attributes?.accessories) ? `Phụ kiện: ${getVal(char.attributes?.accessories)}` : ''
+    ];
+
+    if (char.attributes?.customSlots && char.attributes.customSlots.length > 0) {
+      char.attributes.customSlots.forEach(slot => {
+        if (slot.value || slot.label) {
+           baseDescriptions.push(`${slot.label}: ${slot.value}`);
+        }
+      });
+    }
+
+    const combinedDescription = baseDescriptions.filter(Boolean).join('. ');
+    
+    // Gather all reference images from slots plus the current character image
+    const referenceImages: string[] = [];
+    if (char.imageUrl) {
+        referenceImages.push(char.imageUrl); // Current body look
+    }
+    const attrs: (keyof CharacterAttributes)[] = ['hair', 'clothingTop', 'clothingBottom', 'shoes', 'accessories'];
+    attrs.forEach(key => {
+        const img = getImg(char.attributes?.[key]);
+        if (img) referenceImages.push(img);
+    });
+
+    if (char.attributes?.customSlots) {
+       char.attributes.customSlots.forEach(slot => {
+          if (slot.imageUrl) {
+            referenceImages.push(slot.imageUrl);
+          }
+       });
+    }
+
+    await handleGenerateCharacterConcept(char.id, char.name, combinedDescription, referenceImages);
+  };
+
   const handleUpdateCharacterDescription = (charId: string, description: string) => {
     setAnalysis(prev => {
       if (!prev) return null;
@@ -382,6 +654,59 @@ export default function App() {
         characters: prev.characters.map(c => 
           c.id === charId ? { ...c, description } : c
         )
+      };
+    });
+    setEditingCharId(null);
+  };
+
+  const handleCharacterImageUpload = (charId: string, e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const imageUrl = reader.result as string;
+        setAnalysis(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            characters: prev.characters.map(c => {
+              if (c.id === charId) {
+                const newHistory = [...(c.imageHistory || []), imageUrl];
+                return { 
+                  ...c, 
+                  imageUrl, 
+                  imageHistory: newHistory,
+                  historyIndex: newHistory.length - 1
+                };
+              }
+              return c;
+            })
+          };
+        });
+        setUploadingCharId(null);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleNavigateCharacterHistory = (charId: string, direction: 'prev' | 'next') => {
+    setAnalysis(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        characters: prev.characters.map(c => {
+          if (c.id === charId && c.imageHistory && c.historyIndex !== undefined) {
+            let newIndex = c.historyIndex;
+            if (direction === 'prev' && newIndex > 0) newIndex--;
+            if (direction === 'next' && newIndex < c.imageHistory.length - 1) newIndex++;
+            return {
+              ...c,
+              historyIndex: newIndex,
+              imageUrl: c.imageHistory[newIndex]
+            };
+          }
+          return c;
+        })
       };
     });
   };
@@ -399,6 +724,19 @@ export default function App() {
           await handleGenerateImage(shot.id, shot.description, shot.cameraAngle);
           await new Promise(resolve => setTimeout(resolve, 3000)); // Reduced delay to 3s
         }
+      }
+    }
+  };
+
+  const handleResyncAllImages = async () => {
+    if (!analysis) return;
+    const confirmed = window.confirm("Đồng bộ sẽ tạo lại toàn bộ hình ảnh Storyboard dựa trên Concept nhân vật mới hiện tại. Bạn có chắc chắn không? (Quá trình này có thể tốn thời gian API)");
+    if (!confirmed) return;
+    
+    for (const scene of analysis.scenes) {
+      for (const shot of scene.shots) {
+        await handleGenerateImage(shot.id, shot.description, shot.cameraAngle);
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
   };
@@ -527,48 +865,111 @@ export default function App() {
           <div className="w-9 h-9 bg-black rounded-lg flex items-center justify-center text-white transition-transform group-hover:scale-105 group-hover:rotate-3 shadow-lg shadow-black/10">
             <Clapperboard size={20} />
           </div>
-          <span className="text-xl font-display font-extrabold tracking-tighter uppercase">AnimaticAI</span>
-        </div>
-
-        <div className="hidden md:flex items-center gap-1 bg-black/5 p-1 rounded-full">
-          {AI_MODELS.map((model) => (
-            <button
-              key={model.id}
-              onClick={() => handleModelChange(model.id)}
-              className={cn(
-                "px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all",
-                selectedModel === model.id 
-                  ? "bg-white text-black shadow-sm" 
-                  : "text-black/40 hover:text-black/60"
-              )}
-            >
-              {model.icon} {model.name}
-            </button>
-          ))}
+          <span className="text-xl font-display font-extrabold tracking-tighter uppercase sm:block hidden">AnimaticAI</span>
         </div>
 
         <div className="flex items-center gap-4">
-          {user ? (
-            <div className="flex items-center gap-3">
-              <div className="text-right hidden sm:block">
-                <p className="text-[10px] font-bold uppercase tracking-tight text-black/40 leading-none mb-1">Authenticated</p>
-                <p className="text-sm font-semibold">{user.displayName || user.email?.split('@')[0]}</p>
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="ghost" className="rounded-full w-10 h-10 p-0 border border-black/5 hover:bg-black/5">
+                <Settings size={18} className="text-black/60" />
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[500px] border-none shadow-2xl rounded-3xl p-0 overflow-hidden">
+              <div className="bg-black/5 p-6 border-b border-black/5">
+                <DialogTitle className="text-xl font-display font-bold text-black flex items-center gap-2">
+                  <Settings size={20} className="text-orange-500" />
+                  Cấu hình Hệ thống
+                </DialogTitle>
+                <DialogDescription className="mt-1">
+                  Tuỳ chỉnh mô hình AI và các thiết lập tài khoản.
+                </DialogDescription>
               </div>
-              <button 
-                onClick={handleLogout}
-                className="w-10 h-10 rounded-full border border-black/5 overflow-hidden hover:border-orange-500 transition-colors"
-              >
-                <img src={user.photoURL || `https://avatar.vercel.sh/${user.email}`} alt="avatar" referrerPolicy="no-referrer" />
-              </button>
-            </div>
-          ) : (
-            <Button 
-              onClick={handleLogin} 
-              className="rounded-full bg-black hover:bg-black/80 px-6 font-display font-semibold"
-            >
-              Đăng nhập
-            </Button>
-          )}
+              <div className="p-6 space-y-8">
+                {/* Model Selection */}
+                <div className="space-y-4">
+                  <h4 className="text-xs font-bold uppercase tracking-widest text-black/50">Mô hình Tạo Ảnh</h4>
+                  <div className="grid grid-cols-1 gap-2">
+                    {AI_MODELS.map((model) => (
+                      <div
+                        key={model.id}
+                        onClick={() => handleModelChange(model.id)}
+                        className={cn(
+                          "flex items-center p-3 rounded-2xl border-2 transition-all cursor-pointer group",
+                          selectedModel === model.id 
+                            ? "border-orange-500 bg-orange-50/50" 
+                            : "border-black/5 hover:border-black/10"
+                        )}
+                      >
+                        <div className="text-2xl mr-4">{model.icon}</div>
+                        <div className="flex-1">
+                          <h5 className="font-bold text-sm">{model.name}</h5>
+                          <p className="text-xs text-black/50 mt-0.5">{model.description}</p>
+                        </div>
+                        {selectedModel === model.id ? (
+                           <div className="w-5 h-5 rounded-full bg-orange-500 text-white flex items-center justify-center">
+                              <Check size={12} />
+                           </div>
+                        ) : (
+                           <div className="w-5 h-5 rounded-full border-2 border-black/10 group-hover:border-black/20" />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* API Key Config */}
+                <div className="space-y-4">
+                  <h4 className="text-xs font-bold uppercase tracking-widest text-black/50">API Key Tùy Chỉnh (Tùy chọn)</h4>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Key size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-black/30" />
+                      <Input 
+                        type="password" 
+                        placeholder="Nhập Google AI Studio API Key..." 
+                        className="pl-10 rounded-xl bg-black/5 border-transparent focus-visible:ring-orange-500"
+                        value={customApiKey}
+                        onChange={(e) => handleSaveApiKey(e.target.value)}
+                      />
+                    </div>
+                    {customApiKey && (
+                      <Button variant="ghost" size="sm" onClick={() => handleSaveApiKey("")} className="text-red-500 hover:text-red-600 hover:bg-red-50">
+                        Xóa
+                      </Button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-black/40 leading-relaxed">
+                    Nếu bạn để trống mục này, hệ thống sẽ sử dụng API Key mặc định của ứng dụng. Nhập key của riêng bạn giúp tránh giới hạn quota rate-limit và có thể xuất video Veo.
+                  </p>
+                </div>
+
+                {/* Account / Auth */}
+                <div className="space-y-4">
+                  <h4 className="text-xs font-bold uppercase tracking-widest text-black/50">Tài khoản</h4>
+                  {user ? (
+                    <div className="flex items-center gap-4 bg-black/5 p-4 rounded-2xl">
+                      <img src={user.photoURL || `https://avatar.vercel.sh/${user.email}`} alt="avatar" className="w-12 h-12 rounded-full shadow-sm" referrerPolicy="no-referrer" />
+                      <div className="flex-1">
+                         <p className="font-bold">{user.displayName || 'Người dùng'}</p>
+                         <p className="text-xs text-black/50">{user.email}</p>
+                      </div>
+                      <Button onClick={handleLogout} variant="outline" size="sm" className="rounded-full px-4 border-black/10 hover:bg-black/5">
+                        Đăng xuất
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center p-6 bg-orange-50 rounded-2xl border border-orange-100 text-center">
+                       <UserIcon size={32} className="text-orange-300 mb-2" />
+                       <p className="text-sm font-medium text-orange-800 mb-4">Đăng nhập để tự động lưu lịch sử nhân vật và kịch bản lên Cloud.</p>
+                       <Button onClick={handleLogin} className="w-full rounded-2xl bg-orange-500 hover:bg-orange-600 font-bold shadow-md shadow-orange-500/20">
+                          Đăng nhập bằng Google
+                       </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
         </div>
       </nav>
 
@@ -577,11 +978,8 @@ export default function App() {
         <header className="pt-20 pb-10 px-6 max-w-4xl mx-auto text-center space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-orange-50 text-orange-600 border border-orange-100 text-[10px] font-bold uppercase tracking-widest">
             <Sparkles size={12} />
-            AI-Powered Storyboarding
+            AI-Powered Storyboarding Studio
           </div>
-          <h2 className="text-5xl md:text-7xl font-display font-black tracking-tight leading-[0.95] text-balance">
-            Biến kịch bản thành <span className="text-orange-500">phim hoạt hình</span> chỉ trong tích tắc.
-          </h2>
         </header>
       )}
 
@@ -701,6 +1099,36 @@ export default function App() {
                 )}
               </div>
 
+              <Separator className="bg-black/[0.03]" />
+
+              <div className="space-y-4">
+                <h4 className="text-[10px] font-bold uppercase tracking-widest text-black/30">Tỉ lệ khung hình</h4>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setAspectRatio("16:9")}
+                    className={cn(
+                      "px-4 py-3 rounded-2xl border-2 transition-all font-bold text-xs",
+                      aspectRatio === "16:9" 
+                        ? "border-orange-500 bg-orange-50 text-orange-700" 
+                        : "border-black/5 hover:border-black/10 text-black/60"
+                    )}
+                  >
+                    16:9 (Ngang)
+                  </button>
+                  <button
+                    onClick={() => setAspectRatio("9:16")}
+                    className={cn(
+                      "px-4 py-3 rounded-2xl border-2 transition-all font-bold text-xs",
+                      aspectRatio === "9:16" 
+                        ? "border-orange-500 bg-orange-50 text-orange-700" 
+                        : "border-black/5 hover:border-black/10 text-black/60"
+                    )}
+                  >
+                    9:16 (Dọc)
+                  </button>
+                </div>
+              </div>
+
               <div className="space-y-3 pt-6 border-t border-black/[0.03]">
                  {!isVeoUnlocked ? (
                   <Button 
@@ -800,14 +1228,25 @@ export default function App() {
 
               <div className="flex items-center gap-2 pr-2">
                 {activeTab === "storyboard" && (
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
-                    className="text-[10px] font-black uppercase tracking-widest text-orange-600 hover:bg-orange-50"
-                    onClick={handleGenerateAllImages}
-                  >
-                    Tạo tất cả ảnh
-                  </Button>
+                  <>
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="text-[10px] font-black uppercase tracking-widest text-black/40 hover:text-black/80 hover:bg-black/5"
+                      onClick={handleResyncAllImages}
+                    >
+                      <RefreshCw size={14} className="mr-1" />
+                      Đồng bộ thiết kế
+                    </Button>
+                    <Button 
+                      variant="ghost" 
+                      size="sm" 
+                      className="text-[10px] font-black uppercase tracking-widest text-orange-600 hover:bg-orange-50"
+                      onClick={handleGenerateAllImages}
+                    >
+                      Tạo tất cả ảnh mới
+                    </Button>
+                  </>
                 )}
                 {activeTab === "animatic" && allShots.length > 0 && (
                   <Button 
@@ -826,45 +1265,220 @@ export default function App() {
 
             <div className="mt-6">
               <TabsContent value="characters" className="mt-0 animate-in fade-in duration-500">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 gap-6">
                   {analysis.characters.map((char) => (
                     <Card key={char.id} className="border-none shadow-xl shadow-black/5 bg-white overflow-hidden rounded-3xl group">
-                      <div className="aspect-[4/5] bg-black/5 relative overflow-hidden">
-                        {char.imageUrl ? (
-                          <img src={char.imageUrl} alt={char.name} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex flex-col items-center justify-center p-8 text-center space-y-4">
-                            {generatingCharacters[char.id] ? (
-                              <Loader2 size={32} className="animate-spin text-orange-500" />
-                            ) : (
-                              <UserIcon size={48} className="text-black/10" />
-                            )}
-                            <p className="text-sm text-black/30 font-medium">Chưa có Concept Art cho {char.name}</p>
+                      <div className="flex flex-col lg:flex-row min-h-[400px]">
+                        
+                        {/* Left Side: Equipment Slots */}
+                        <div className="lg:w-2/5 p-6 border-r border-black/5 flex flex-col justify-between bg-black/[0.01]">
+                          <div className="space-y-4">
+                            <div className="flex items-center justify-between">
+                              <h4 className="text-xl font-display font-bold text-black">{char.name}</h4>
+                            </div>
+                            
+                            <div className="text-xs text-black/50 italic mb-4">
+                              {char.description}
+                            </div>
+                            
+                            <div className="space-y-3">
+                              {[
+                                { key: 'hair' as keyof CharacterAttributes, icon: Scissors, label: 'Tóc & Khuôn mặt', placeholder: 'Ví dụ: Tóc ngắn ngang vai màu nâu...' },
+                                { key: 'clothingTop' as keyof CharacterAttributes, icon: Shirt, label: 'Áo & Bộ đồ', placeholder: 'Ví dụ: Áo hoodie màu vàng...' },
+                                { key: 'clothingBottom' as keyof CharacterAttributes, icon: ShoppingBag, label: 'Quần & Váy', placeholder: 'Ví dụ: Quần jean xanh rách...' },
+                                { key: 'shoes' as keyof CharacterAttributes, icon: Footprints, label: 'Giày dép', placeholder: 'Ví dụ: Sneaker đỏ...' },
+                                { key: 'accessories' as keyof CharacterAttributes, icon: Glasses, label: 'Phụ kiện', placeholder: 'Kính, túi...' },
+                              ].map((slot) => {
+                                const currentAttr = char.attributes?.[slot.key] as any;
+                                const value = currentAttr?.value || (typeof currentAttr === 'string' ? currentAttr : '');
+                                const imgUrl = currentAttr?.imageUrl;
+
+                                return (
+                                  <div key={slot.key} className="flex gap-3 border rounded-2xl p-2 bg-white shadow-sm shadow-black/5 border-black/5 transition-all focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-500/20">
+                                    <div className="relative w-16 h-16 rounded-xl bg-black/5 flex-shrink-0 overflow-hidden border border-black/10 group cursor-pointer hover:bg-black/10 transition-colors">
+                                      <input 
+                                        type="file" 
+                                        accept="image/*" 
+                                        className="absolute inset-0 opacity-0 cursor-pointer z-10"
+                                        onChange={(e) => handleAttributeImageUpload(char.id, slot.key, e)}
+                                      />
+                                      {imgUrl ? (
+                                        <img src={imgUrl} className="w-full h-full object-cover" />
+                                      ) : (
+                                        <div className="w-full h-full flex flex-col items-center justify-center text-black/20 group-hover:text-black/50">
+                                          <UploadCloud size={16} />
+                                        </div>
+                                      )}
+                                      <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[8px] font-bold text-center py-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        THÊM ẢNH
+                                      </div>
+                                    </div>
+                                    <div className="flex-1 flex flex-col justify-center">
+                                      <div className="flex items-center gap-1.5 text-[10px] text-black/50 font-bold uppercase mb-1">
+                                        <slot.icon size={12} /> {slot.label}
+                                      </div>
+                                      <input 
+                                        value={value}
+                                        onChange={(e) => handleUpdateCharacterAttributeText(char.id, slot.key, e.target.value)}
+                                        placeholder={slot.placeholder}
+                                        className="w-full bg-transparent text-sm font-medium focus:outline-none"
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+
+                              {/* Render custom slots */}
+                              {char.attributes?.customSlots?.map(customSlot => (
+                                <div key={customSlot.id} className="flex gap-3 border rounded-2xl p-2 bg-white shadow-sm shadow-black/5 border-orange-200 transition-all focus-within:border-orange-500 focus-within:ring-2 focus-within:ring-orange-500/20 relative group">
+                                    {/* Delete slot button (only visible on hover) */}
+                                    <button 
+                                      onClick={() => {
+                                        setAnalysis(prev => {
+                                          if(!prev) return null;
+                                          return {
+                                            ...prev,
+                                            characters: prev.characters.map(c => 
+                                              c.id === char.id ? {
+                                                ...c,
+                                                attributes: {
+                                                  ...c.attributes,
+                                                  customSlots: c.attributes?.customSlots?.filter(cs => cs.id !== customSlot.id)
+                                                }
+                                              } : c
+                                            )
+                                          }
+                                        })
+                                      }}
+                                      className="absolute -top-2 -right-2 bg-red-100 text-red-600 rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity z-20 hover:bg-red-500 hover:text-white"
+                                    >
+                                      <X size={12} />
+                                    </button>
+
+                                    <div className="relative w-16 h-16 rounded-xl bg-orange-50/50 flex-shrink-0 overflow-hidden border border-orange-100 group/img cursor-pointer hover:bg-orange-100/50 transition-colors">
+                                      <input 
+                                        type="file" 
+                                        accept="image/*" 
+                                        className="absolute inset-0 opacity-0 cursor-pointer z-10"
+                                        onChange={(e) => handleCustomAttributeImageUpload(char.id, customSlot.id, e)}
+                                      />
+                                      {customSlot.imageUrl ? (
+                                        <img src={customSlot.imageUrl} className="w-full h-full object-cover" />
+                                      ) : (
+                                        <div className="w-full h-full flex flex-col items-center justify-center text-orange-300 group-hover/img:text-orange-500">
+                                          <UploadCloud size={16} />
+                                        </div>
+                                      )}
+                                      <div className="absolute inset-x-0 bottom-0 bg-black/60 text-white text-[8px] font-bold text-center py-0.5 opacity-0 group-hover/img:opacity-100 transition-opacity">
+                                        THÊM ẢNH
+                                      </div>
+                                    </div>
+                                    <div className="flex-1 flex flex-col justify-center space-y-1">
+                                      <div className="flex items-center gap-1.5 text-[10px] text-orange-600 font-bold uppercase">
+                                        <TextCursorInput size={12} /> 
+                                        <input 
+                                          value={customSlot.label}
+                                          onChange={(e) => handleUpdateCustomAttributeLabel(char.id, customSlot.id, e.target.value)}
+                                          placeholder="Tên món đồ (VD: Vũ khí)"
+                                          className="bg-transparent border-b border-orange-200 focus:border-orange-500 focus:outline-none placeholder:text-orange-300 max-w-[120px]"
+                                        />
+                                      </div>
+                                      <input 
+                                        value={customSlot.value}
+                                        onChange={(e) => handleUpdateCustomAttributeText(char.id, customSlot.id, e.target.value)}
+                                        placeholder="Mô tả chi tiết..."
+                                        className="w-full bg-transparent text-sm font-medium focus:outline-none"
+                                      />
+                                    </div>
+                                </div>
+                              ))}
+
+                              {/* Add custom slot button */}
+                              <Button 
+                                variant="outline" 
+                                className="w-full border-dashed border-2 rounded-2xl text-black/50 hover:text-black hover:border-black/20 hover:bg-black/5 mt-2 h-14"
+                                onClick={() => handleAddCustomAttributeSlot(char.id)}
+                              >
+                                <Plus size={16} className="mr-2" /> Thêm phụ kiện khác
+                              </Button>
+                            </div>
                           </div>
-                        )}
-                        <div className="absolute inset-x-0 bottom-0 p-6 bg-gradient-to-t from-black/80 via-black/40 to-transparent">
-                          <h4 className="text-xl font-display font-bold text-white">{char.name}</h4>
-                          <p className="text-white/60 text-xs mt-1 uppercase tracking-widest font-bold">Concept Reference</p>
+                          
+                          <Button 
+                            className="w-full bg-black hover:bg-black/90 text-white rounded-2xl py-6 mt-6 font-bold transition-all active:scale-[0.98] shadow-lg shadow-black/10"
+                            onClick={() => handleGenerateCharacterConceptWithAttributes(char)}
+                            disabled={generatingCharacters[char.id]}
+                          >
+                            {generatingCharacters[char.id] ? (
+                              <Loader2 size={16} className="animate-spin mr-2" />
+                            ) : (
+                              <Sparkles size={16} className="mr-2 text-orange-400" />
+                            )}
+                            {char.imageUrl ? "Cập nhật (Reroll)" : "Tạo Concept Art"}
+                          </Button>
+                        </div>
+
+                        {/* Right Side: Image Preview Preview */}
+                        <div className="lg:w-3/5 bg-black/5 relative overflow-hidden flex flex-col items-center justify-center min-h-[400px]">
+                          <div className="absolute top-4 right-4 flex gap-2 z-10">
+                            <input 
+                              type="file" 
+                              accept="image/*" 
+                              className="hidden" 
+                              id={`upload-${char.id}`}
+                              onChange={(e) => {
+                                setUploadingCharId(char.id);
+                                handleCharacterImageUpload(char.id, e);
+                              }}
+                            />
+                            <label htmlFor={`upload-${char.id}`}>
+                              <div className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-md flex items-center justify-center text-white cursor-pointer hover:bg-black/60 transition-colors shadow-sm">
+                                {uploadingCharId === char.id ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
+                              </div>
+                            </label>
+                          </div>
+
+                          {char.imageHistory && char.imageHistory.length > 0 && (
+                            <div className="absolute top-4 left-4 flex gap-2 z-10 bg-black/40 backdrop-blur-md rounded-full p-1.5 shadow-sm">
+                              <button 
+                                onClick={() => handleNavigateCharacterHistory(char.id, 'prev')}
+                                disabled={char.historyIndex === 0}
+                                className="w-8 h-8 rounded-full flex items-center justify-center text-white disabled:opacity-20 hover:bg-white/20 transition-colors"
+                              >
+                                <RotateCcw size={14} />
+                              </button>
+                              <div className="text-white text-xs font-bold self-center px-2">
+                                {(char.historyIndex || 0) + 1} / {char.imageHistory.length}
+                              </div>
+                              <button 
+                                onClick={() => handleNavigateCharacterHistory(char.id, 'next')}
+                                disabled={char.historyIndex === char.imageHistory.length - 1}
+                                className="w-8 h-8 rounded-full flex items-center justify-center text-white disabled:opacity-20 hover:bg-white/20 transition-colors"
+                              >
+                                <RotateCw size={14} />
+                              </button>
+                            </div>
+                          )}
+
+                          {char.imageUrl ? (
+                            <div className="w-full relative py-8 px-4 flex items-center justify-center">
+                               <img src={char.imageUrl} alt={char.name} className="w-full max-w-full max-h-[600px] object-contain drop-shadow-2xl" />
+                               <div className="absolute bottom-4 inset-x-0 text-center">
+                                  <Badge variant="secondary" className="bg-black/10 text-black/40 border-none">Character Turnaround Sheet</Badge>
+                               </div>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center justify-center p-8 text-center space-y-4">
+                              {generatingCharacters[char.id] ? (
+                                <Loader2 size={40} className="animate-spin text-orange-500" />
+                              ) : (
+                                <UserIcon size={56} className="text-black/10" />
+                              )}
+                              <p className="text-sm text-black/30 font-medium">Chưa có Concept Art</p>
+                            </div>
+                          )}
                         </div>
                       </div>
-                      <CardContent className="p-6 space-y-4">
-                        <div className="space-y-2">
-                          <h5 className="text-[10px] font-bold uppercase tracking-widest text-black/30">Hồ sơ nhận dạng</h5>
-                          <p className="text-sm text-black/60 leading-relaxed italic">"{char.description}"</p>
-                        </div>
-                        <Button 
-                          className="w-full bg-black hover:bg-black/80 text-white rounded-2xl py-6 font-bold"
-                          onClick={() => handleGenerateCharacterConcept(char.id, char.name, char.description)}
-                          disabled={generatingCharacters[char.id]}
-                        >
-                          {generatingCharacters[char.id] ? (
-                            <Loader2 size={16} className="animate-spin mr-2" />
-                          ) : (
-                            <Sparkles size={16} className="mr-2" />
-                          )}
-                          {char.imageUrl ? "Cập nhật Concept Art" : "Tạo Concept Art tham chiếu"}
-                        </Button>
-                      </CardContent>
                     </Card>
                   ))}
                 </div>
@@ -909,68 +1523,91 @@ Cậu bé nhắm mắt lại. Một ánh sáng rực rỡ xuất hiện.`}
                   </div>
                 </div>
               ) : (
-                analysis.scenes.map((scene, sIdx) => (
-                  <div key={scene.id} className="space-y-4">
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-full bg-black text-white flex items-center justify-center font-bold">
-                        {sIdx + 1}
+                <div className="space-y-6">
+                  {/* Pagination Controls */}
+                  <div className="flex flex-wrap items-center gap-2 mb-6">
+                    {analysis.scenes.map((_, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setCurrentScenePage(idx)}
+                        className={cn(
+                          "px-4 py-2 rounded-xl text-sm font-bold transition-all",
+                          currentScenePage === idx 
+                            ? "bg-black text-white" 
+                            : "bg-black/5 text-black/60 hover:bg-black/10"
+                        )}
+                      >
+                        Trang {idx + 1}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Render the current scene based on pagination */}
+                  {analysis.scenes[currentScenePage] && (
+                    <div className="space-y-4 animate-in fade-in duration-500">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 rounded-full bg-black text-white flex items-center justify-center font-bold">
+                          {currentScenePage + 1}
+                        </div>
+                        <div>
+                          <h3 className="text-xl font-bold">{analysis.scenes[currentScenePage].title}</h3>
+                          <p className="text-sm text-black/50">{analysis.scenes[currentScenePage].description}</p>
+                        </div>
                       </div>
-                      <div>
-                        <h3 className="text-xl font-bold">{scene.title}</h3>
-                        <p className="text-sm text-black/50">{scene.description}</p>
-                      </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      {scene.shots.map((shot, shIdx) => (
-                        <Card key={shot.id} className="group border-none shadow-lg shadow-black/5 bg-white overflow-hidden hover:shadow-xl transition-all duration-300">
-                          <div className="aspect-video bg-black/5 relative overflow-hidden">
-                            {shot.imageUrl ? (
-                              <img 
-                                src={shot.imageUrl} 
-                                alt={shot.description} 
-                                className="w-full h-full object-cover"
-                                referrerPolicy="no-referrer"
-                              />
-                            ) : (
-                              <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center space-y-3">
-                                {generatingImages[shot.id] ? (
-                                  <>
-                                    <Loader2 className="h-8 w-8 animate-spin text-orange-500" />
-                                    <p className="text-xs font-medium text-orange-600 animate-pulse">AI đang vẽ...</p>
-                                  </>
-                                ) : (
-                                  <>
-                                    <ImageIcon size={32} className="text-black/10" />
-                                    <Button 
-                                      variant="outline" 
-                                      size="sm" 
-                                      className="rounded-full border-black/10 hover:bg-black hover:text-white"
-                                      onClick={() => handleGenerateImage(shot.id, shot.description, shot.cameraAngle)}
-                                    >
-                                      Tạo hình ảnh AI
-                                    </Button>
-                                  </>
+                      
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {analysis.scenes[currentScenePage].shots.map((shot, shIdx) => (
+                          <Card key={shot.id} className="group border-none shadow-lg shadow-black/5 bg-white overflow-hidden hover:shadow-xl transition-all duration-300">
+                            <div className={cn(
+                              "bg-black/5 relative overflow-hidden",
+                              aspectRatio === "9:16" ? "aspect-[9/16]" : "aspect-[16/9]"
+                            )}>
+                              {shot.imageUrl ? (
+                                <img 
+                                  src={shot.imageUrl} 
+                                  alt={shot.description} 
+                                  className="w-full h-full object-cover"
+                                  referrerPolicy="no-referrer"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center space-y-3">
+                                  {generatingImages[shot.id] ? (
+                                    <>
+                                      <Loader2 className="h-8 w-8 animate-spin text-orange-500" />
+                                      <p className="text-xs font-medium text-orange-600 animate-pulse">AI đang vẽ...</p>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ImageIcon size={32} className="text-black/10" />
+                                      <Button 
+                                        variant="outline" 
+                                        size="sm" 
+                                        className="rounded-full border-black/10 hover:bg-black hover:text-white"
+                                        onClick={() => handleGenerateImage(shot.id, shot.description, shot.cameraAngle)}
+                                      >
+                                        Tạo hình ảnh AI
+                                      </Button>
+                                    </>
+                                  )}
+                                </div>
+                              )}
+                              <div className="absolute top-3 left-3 flex gap-2">
+                                <Badge className="bg-black/80 text-white border-none backdrop-blur-md">
+                                  Khung hình {shIdx + 1}
+                                </Badge>
+                                {shot.videoUrl && (
+                                  <Badge className="bg-indigo-600 text-white border-none backdrop-blur-md">
+                                    AI Video
+                                  </Badge>
                                 )}
                               </div>
-                            )}
-                            <div className="absolute top-3 left-3 flex gap-2">
-                              <Badge className="bg-black/80 text-white border-none backdrop-blur-md">
-                                Khung hình {shIdx + 1}
-                              </Badge>
-                              {shot.videoUrl && (
-                                <Badge className="bg-indigo-600 text-white border-none backdrop-blur-md">
-                                  AI Video
+                              <div className="absolute bottom-3 right-3">
+                                <Badge variant="secondary" className="bg-white/90 text-black border-none backdrop-blur-md">
+                                  {shot.cameraAngle}
                                 </Badge>
-                              )}
+                              </div>
                             </div>
-                            <div className="absolute bottom-3 right-3">
-                              <Badge variant="secondary" className="bg-white/90 text-black border-none backdrop-blur-md">
-                                {shot.cameraAngle}
-                              </Badge>
-                            </div>
-                          </div>
-                          <CardContent className="p-4 space-y-3">
+                            <CardContent className="p-4 space-y-3">
                             <p className="text-sm font-medium leading-relaxed line-clamp-2 group-hover:line-clamp-none transition-all">
                               {shot.description}
                             </p>
@@ -1022,9 +1659,9 @@ Cậu bé nhắm mắt lại. Một ánh sáng rực rỡ xuất hiện.`}
                         </Card>
                       ))}
                     </div>
-                    <Separator className="my-8 bg-black/5" />
                   </div>
-                ))
+                )}
+                </div>
               )}
             </TabsContent>
 

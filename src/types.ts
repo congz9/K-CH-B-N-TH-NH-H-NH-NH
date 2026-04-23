@@ -1,8 +1,30 @@
+export interface AttributeSlot {
+  value: string;
+  imageUrl?: string;
+}
+
+export interface CustomAttributeSlot extends AttributeSlot {
+  id: string;
+  label: string;
+}
+
+export interface CharacterAttributes {
+  hair?: AttributeSlot | string;
+  clothingTop?: AttributeSlot | string;
+  clothingBottom?: AttributeSlot | string;
+  shoes?: AttributeSlot | string;
+  accessories?: AttributeSlot | string;
+  customSlots?: CustomAttributeSlot[];
+}
+
 export interface Character {
   id: string;
   name: string;
   description: string;
   imageUrl?: string;
+  imageHistory?: string[];
+  historyIndex?: number;
+  attributes?: CharacterAttributes;
 }
 
 export interface Shot {

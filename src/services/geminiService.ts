@@ -1,7 +1,10 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { ScriptAnalysis } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+export const getAIClient = () => {
+  const customKey = localStorage.getItem("customAIApiKey");
+  return new GoogleGenAI({ apiKey: customKey || process.env.GEMINI_API_KEY || "" });
+};
 
 async function withRetry<T>(fn: () => Promise<T>, maxRetries: number = 10): Promise<T> {
   let lastError: any;
@@ -38,6 +41,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries: number = 10): Prom
 
 export async function analyzeScript(script: string, model: string = "gemini-3-flash-preview"): Promise<ScriptAnalysis> {
   return withRetry(async () => {
+    const ai = getAIClient();
     const response = await ai.models.generateContent({
       model: model,
       contents: `Phân tích kịch bản hoạt hình sau đây và trích xuất các cảnh (scenes), khung hình (shots), nhân vật (characters), và đạo cụ (props). 
@@ -126,10 +130,12 @@ export async function generateCharacterConcept(
   name: string,
   description: string,
   style: string = "Sketch",
-  model: string = "gemini-2.5-flash-image"
+  model: string = "gemini-2.5-flash-image",
+  referenceImages?: string[]
 ): Promise<string> {
   try {
     return await withRetry(async () => {
+      const ai = getAIClient();
       let stylePrompt = "";
       switch (style) {
         case "2D Animation":
@@ -149,14 +155,14 @@ export async function generateCharacterConcept(
       }
 
       if (model.startsWith("imagen")) {
-        const prompt = `CHARACTER DESIGN SHEET. Name: ${name}. Description: ${description}. Style: ${stylePrompt}. Clean background, full body.`;
+        const prompt = `CHARACTER DESIGN TURNAROUND SHEET. Multiple angles (Front, Back, Side/Profile, and 3/4 view). Name: ${name}. Description: ${description}. Style: ${stylePrompt}. Clean background, full body.`;
         const response = await ai.models.generateImages({
           model: model,
           prompt: prompt.substring(0, 1000),
           config: {
             numberOfImages: 1,
             outputMimeType: "image/jpeg",
-            aspectRatio: "1:1"
+            aspectRatio: "16:9" // Wider aspect ratio is better for turnaround sheets
           }
         });
         const base64 = response.generatedImages?.[0]?.image?.imageBytes;
@@ -174,25 +180,43 @@ export async function generateCharacterConcept(
         };
       }
 
+      const parts: any[] = [{
+        text: `STRICT CHARACTER DESIGN TURNAROUND SHEET.
+        
+        Character Name: ${name}. 
+        Physical Description: ${description}. 
+        
+        Style: ${stylePrompt}. 
+        
+        INSTRUCTIONS:
+        1. Draw a CHARACTER TURNAROUND SHEET showing multiple angles of the exact same character side-by-side.
+        2. MUST include: Front view, Back view, 3/4 view, and Side profile.
+        3. All views must be full-body and perfectly aligned horizontally.
+        4. If the description says "robot", "mechanical", or "non-human", do NOT draw a human silhouette or a person in a suit.
+        5. Use a neutral, plain background (preferably white or light grey) with subtle ground shadows to anchor the character.
+        6. Masterpiece quality, highly detailed.`
+      }];
+
+      if (referenceImages && referenceImages.length > 0) {
+        referenceImages.forEach((img, index) => {
+           if (img.startsWith("data:")) {
+               const b64Parts = img.split(",");
+               const mimeType = b64Parts[0].split(":")[1].split(";")[0];
+               const data = b64Parts[1];
+               parts.push({ text: `Reference image ${index + 1}:` });
+               parts.push({
+                 inlineData: {
+                   data: data,
+                   mimeType: mimeType
+                 }
+               });
+           }
+        });
+      }
+
       const response = await ai.models.generateContent({
         model: model,
-        contents: {
-          parts: [{
-            text: `STRICT CHARACTER DESIGN SHEET.
-            
-            Character Name: ${name}. 
-            Physical Description: ${description}. 
-            
-            Style: ${stylePrompt}. 
-            
-            INSTRUCTIONS:
-            1. Draw a clear, full-body character design sheet.
-            2. If the description says "robot", "mechanical", or "non-human", do NOT draw a human silhouette or a person in a suit. It MUST be a literal robot/creature.
-            3. Use a neutral, plain background (preferably white or light grey).
-            4. Focus on visual clarity and consistent features.
-            5. Masterpiece quality, highly detailed.`
-          }]
-        },
+        contents: { parts },
         config: Object.keys(config).length > 0 ? config : undefined,
       });
 
@@ -205,7 +229,7 @@ export async function generateCharacterConcept(
   } catch (error: any) {
     if (error?.message === "403_PERMISSION_DENIED" && model !== "gemini-2.5-flash-image") {
       console.warn(`Falling back from ${model} to gemini-2.5-flash-image due to 403 error.`);
-      return generateCharacterConcept(name, description, style, "gemini-2.5-flash-image");
+      return generateCharacterConcept(name, description, style, "gemini-2.5-flash-image", referenceImages);
     }
     throw error;
   }
@@ -218,7 +242,7 @@ export async function generateVideo(
 ): Promise<string> {
   // Use VEO for high quality video generation
   // Create a new instance right before call as per skill guidance
-  const videoAi = new GoogleGenAI({ apiKey: process.env.API_KEY || process.env.GEMINI_API_KEY || "" });
+  const videoAi = getAIClient();
   
   return withRetry(async () => {
     let imagePart: any = undefined;
@@ -282,7 +306,8 @@ export async function generateStoryboardImage(
   propsDescriptions?: string, // Global props/vehicles context
   characterImages?: string[], // Character reference images
   model: string = "gemini-2.5-flash-image",
-  isHighFidelity: boolean = false
+  isHighFidelity: boolean = false,
+  aspectRatio: "16:9" | "9:16" = "16:9"
 ): Promise<string> {
   try {
     return await withRetry(async () => {
@@ -316,6 +341,7 @@ export async function generateStoryboardImage(
     }
 
     if (model.startsWith("imagen")) {
+      const ai = getAIClient();
       const prompt = `Storyboard shot. ${description}. Camera: ${cameraAngle}. Style: ${stylePrompt}. Context: ${characterDescriptions} ${propsDescriptions}`;
       const response = await ai.models.generateImages({
         model: model,
@@ -323,7 +349,7 @@ export async function generateStoryboardImage(
         config: {
           numberOfImages: 1,
           outputMimeType: "image/jpeg",
-          aspectRatio: "16:9",
+          aspectRatio: aspectRatio,
           // Note: In production Vertex AI environments, you can specify safety settings and higher resolution models here
         }
       });
@@ -381,11 +407,12 @@ export async function generateStoryboardImage(
     const config: any = {};
     if (model === "gemini-3.1-flash-image-preview") {
       config.imageConfig = {
-        aspectRatio: "16:9",
+        aspectRatio: aspectRatio,
         imageSize: "2K"
       };
     }
 
+    const ai = getAIClient();
     const response = await ai.models.generateContent({
       model: model,
       contents: { parts },
